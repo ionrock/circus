@@ -1,15 +1,16 @@
 import time
 import sys
 import os
-import tempfile
 import unittest
+import zmq
+from zmq.eventloop import ioloop, zmqstream
 
 from datetime import datetime
 from cStringIO import StringIO
 
 from circus.client import make_message
 from circus.tests.support import TestCircus, poll_for, truncate_file
-from circus.stream import FileStream
+from circus.tests.support import wait_for_value, OutputReader
 from circus.stream import FancyStdoutStream
 
 
@@ -28,18 +29,35 @@ def run_process(*args, **kw):
 
 class TestWatcher(TestCircus):
 
+    def attach_output_listener(self, recv):
+        # OK! Need to set up a plugin that writes to a file and then
+        # read from that rather than trying to listen on the pub/sub
+        # socket.
+        endpoint = 'tcp://127.0.0.1:5556'
+        ctx = zmq.Context()
+        sub = ctx.socket(zmq.SUB)
+        sub.setsockopt(zmq.SUBSCRIBE, b'test_watcher.')
+        sub.connect(endpoint)
+        stream = zmqstream.ZMQStream(sub)
+        stream.on_recv(recv)
+
     def setUp(self):
         super(TestWatcher, self).setUp()
+
+        self.data = []
+
+        def handle_recv(data):
+            self.data.append(data)
+
+        self.attach_output_listener(handle_recv)
+
         dummy_process = 'circus.tests.test_stream.run_process'
-        fd, self.stdout = tempfile.mkstemp()
-        os.close(fd)
-        fd, self.stderr = tempfile.mkstemp()
-        os.close(fd)
         self.test_file = self._run_circus(
             dummy_process,
-            stdout_stream={'stream': FileStream(self.stdout)},
-            stderr_stream={'stream': FileStream(self.stderr)},
-            debug=True)
+            publish={'streams': ['stdout', 'stderr']},
+            debug=True,
+
+        )
 
     def call(self, cmd, **props):
         msg = make_message(cmd, **props)
@@ -47,10 +65,13 @@ class TestWatcher(TestCircus):
 
     def tearDown(self):
         super(TestWatcher, self).tearDown()
-        os.remove(self.stdout)
-        os.remove(self.stderr)
+        #os.remove(self.stdout)
+        #os.remove(self.stderr)
 
     def test_stream(self):
+        wait_for_value(self.data, 10)
+        print(self.data)
+
         # wait for the process to be started
         self.assertTrue(poll_for(self.stdout, 'stdout'))
         self.assertTrue(poll_for(self.stderr, 'stderr'))

@@ -1,4 +1,3 @@
-import copy
 import errno
 import os
 import signal
@@ -13,7 +12,7 @@ from zmq.eventloop import ioloop
 from circus.process import Process, DEAD_OR_ZOMBIE, UNEXISTING
 from circus import logger
 from circus import util
-from circus.stream import get_pipe_redirector, get_stream
+from circus.stream import Redirector, Publisher
 from circus.util import parse_env_dict, resolve_name
 
 
@@ -151,9 +150,9 @@ class Watcher(object):
     def __init__(self, name, cmd, args=None, numprocesses=1, warmup_delay=0.,
                  working_dir=None, shell=False, uid=None, max_retry=5,
                  gid=None, send_hup=False, env=None, stopped=True,
-                 graceful_timeout=30., prereload_fn=None,
-                 rlimits=None, executable=None, stdout_stream=None,
-                 stderr_stream=None, priority=0, loop=None,
+                 graceful_timeout=30., prereload_fn=None, rlimits=None,
+                 executable=None, publish=None, stream_stdout=None,
+                 stream_stderr=None, priority=0, loop=None,
                  singleton=False, use_sockets=False, copy_env=False,
                  copy_path=False, max_age=0, max_age_variance=30,
                  hooks=None, respawn=True, autostart=True, **options):
@@ -170,11 +169,10 @@ class Watcher(object):
         self.prereload_fn = prereload_fn
         self.executable = None
         self.priority = priority
-        self.stdout_stream_conf = copy.copy(stdout_stream)
-        self.stderr_stream_conf = copy.copy(stderr_stream)
-        self.stdout_stream = get_stream(self.stdout_stream_conf)
-        self.stderr_stream = get_stream(self.stderr_stream_conf)
-        self.stdout_redirector = self.stderr_redirector = None
+        self.publish = publish or {}
+        self.stream_stdout = stream_stdout
+        self.stream_stderr = stream_stderr
+        self.stdout = self.stderr = None
         self.max_retry = max_retry
         self._options = options
         self.singleton = singleton
@@ -196,8 +194,8 @@ class Watcher(object):
                           "uid", "gid", "send_hup", "shell", "env",
                           "max_retry", "cmd", "args", "graceful_timeout",
                           "executable", "use_sockets", "priority", "copy_env",
-                          "singleton", "stdout_stream_conf",
-                          "stderr_stream_conf", "max_age", "max_age_variance")
+                          "singleton", "publish", "max_age",
+                          "max_age_variance")
                          + tuple(options.keys()))
 
         if not working_dir:
@@ -227,26 +225,6 @@ class Watcher(object):
         self.send_hup = send_hup
         self.sockets = self.evpub_socket = None
         self.arbiter = None
-
-    def _create_redirectors(self):
-        if self.stdout_stream:
-            if (self.stdout_redirector is not None and
-                    self.stdout_redirector.running):
-                self.stdout_redirector.kill()
-            self.stdout_redirector = get_pipe_redirector(
-                self.stdout_stream, loop=self.loop)
-        else:
-            self.stdout_redirector = None
-
-        if self.stderr_stream:
-            if (self.stderr_redirector is not None and
-                    self.stderr_redirector.running):
-                self.stderr_redirector.kill()
-
-            self.stderr_redirector = get_pipe_redirector(
-                self.stderr_stream, loop=self.loop)
-        else:
-            self.stderr_redirector = None
 
     def _resolve_hooks(self, hooks):
         """Check the supplied hooks argument to make sure we can find
@@ -283,6 +261,19 @@ class Watcher(object):
         self.evpub_socket = evpub_socket
         self.sockets = sockets
         self.arbiter = arbiter
+
+        # default refresh_time
+        refresh_time = float(0.3)
+
+        self.stdout = Redirector(
+            Publisher(self.notify_event, topic='stdout', **self.publish),
+            float(self.publish.get('refresh_time', refresh_time)),
+            loop=self.loop)
+
+        self.stderr = Redirector(
+            Publisher(self.notify_event, topic='stderr', **self.publish),
+            float(self.publish.get('refresh_time', refresh_time)),
+            loop=self.loop)
 
     def __len__(self):
         return len(self.processes)
@@ -427,16 +418,13 @@ class Watcher(object):
                                   executable=self.executable,
                                   use_fds=self.use_sockets, watcher=self)
 
-                # stream stderr/stdout if configured
-                if self.stdout_redirector is not None:
-                    self.stdout_redirector.add_redirection('stdout',
-                                                           process,
-                                                           process.stdout)
+                self.stdout.add_redirection('stdout',
+                                            process,
+                                            process.stdout)
 
-                if self.stderr_redirector is not None:
-                    self.stderr_redirector.add_redirection('stderr',
-                                                           process,
-                                                           process.stderr)
+                self.stderr.add_redirection('stderr',
+                                            process,
+                                            process.stderr)
 
                 self.processes[process.pid] = process
                 logger.debug('running %s process [pid %d]', self.name,
@@ -459,11 +447,11 @@ class Watcher(object):
         """Kill process.
         """
         # remove redirections
-        if self.stdout_redirector is not None:
-            self.stdout_redirector.remove_redirection('stdout', process)
+        if self.stdout is not None:
+            self.stdout.remove_redirection('stdout', process)
 
-        if self.stderr_redirector is not None:
-            self.stderr_redirector.remove_redirection('stderr', process)
+        if self.stderr is not None:
+            self.stderr.remove_redirection('stderr', process)
 
         logger.debug("%s: kill process %s", self.name, process.pid)
         try:
@@ -552,11 +540,11 @@ class Watcher(object):
         """
         logger.debug('stopping the %s watcher' % self.name)
         # stop redirectors
-        if self.stdout_redirector is not None:
-            self.stdout_redirector.kill()
+        if self.stdout is not None:
+            self.stdout.kill()
 
-        if self.stderr_redirector is not None:
-            self.stderr_redirector.kill()
+        if self.stderr is not None:
+            self.stderr.kill()
 
         limit = time.time() + self.graceful_timeout
 
@@ -627,7 +615,7 @@ class Watcher(object):
             self.stopped = True
             return False
 
-        self._create_redirectors()
+        # self._create_redirectors()
         self.reap_processes()
         self.spawn_processes()
 
@@ -636,11 +624,11 @@ class Watcher(object):
             self.stop()
             return False
 
-        if self.stdout_redirector is not None:
-            self.stdout_redirector.start()
+        if self.stdout is not None:
+            self.stdout.start()
 
-        if self.stderr_redirector is not None:
-            self.stderr_redirector.start()
+        if self.stderr is not None:
+            self.stderr.start()
 
         logger.info('%s started' % self.name)
         self.notify_event("start", {"time": time.time()})

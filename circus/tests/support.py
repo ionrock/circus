@@ -12,6 +12,7 @@ import unittest2 as unittest
 from circus import get_arbiter
 from circus.util import DEFAULT_ENDPOINT_STATS
 from circus.client import CircusClient, make_message
+from circus.plugins import CircusPlugin
 
 
 def resolve_name(name):
@@ -164,6 +165,15 @@ class TimeoutException(Exception):
     pass
 
 
+def wait_for_value(variable, timeout=5):
+    start = time()
+    while (time() - start) < timeout:
+        if len(variable) > 0:
+            return True
+        sleep(0)
+    raise TimeoutException('Timeout waiting for "%s"' % variable)
+
+
 def poll_for(filename, needle, timeout=5):
     """Poll a file for a given string.
 
@@ -187,3 +197,17 @@ def poll_for(filename, needle, timeout=5):
 def truncate_file(filename):
     """Truncate a file (empty it)."""
     open(filename, 'w').close()  # opening as 'w' overwrites the file
+
+
+class OutputReader(CircusPlugin):
+    def __init__(self, *args, **kw):
+        self.output = []
+        super(OutputReader, self).__init__(*args, **kw)
+
+    def handle_recv(self, data):
+        self.output.append(data)
+
+    def reset(self):
+        self.output = []
+
+    

@@ -28,8 +28,9 @@ def watcher_defaults():
         'max_retry': 5,
         'graceful_timeout': 30,
         'rlimits': dict(),
-        'stderr_stream': dict(),
-        'stdout_stream': dict(),
+        'publish': dict(),
+        'stream_stdout': dict(),
+        'stream_stderr': dict(),
         'priority': 0,
         'use_sockets': False,
         'singleton': False,
@@ -63,6 +64,21 @@ class DefaultConfigParser(StrictConfigParser):
             return self.getboolean(section, option)
         else:
             raise NotImplementedError()
+
+
+def create_plugin_from_stream(conf, watcher, stream):
+    if 'class' not in conf:
+        return
+
+    # just grab stdout/err
+    stream = stream.split('_')[1]
+    
+    plugin = {
+        'use': conf.pop('class'),
+        'topic': 'watcher.%s.%s' % (watcher, stream),
+    }
+    plugin.update(conf)
+    return plugin
 
 
 def read_config(config_path):
@@ -181,10 +197,15 @@ def get_config(config_file):
                 elif opt == 'graceful_timout':
                     watcher['graceful_timeout'] = dget(
                         section, "graceful_timeout", 30, int)
-                elif opt.startswith('stderr_stream') or \
-                        opt.startswith('stdout_stream'):
+
+                elif opt.startswith('publish'):
+                    X, publish_opt = opt.split(".", 1)
+                    watcher['publish'][publish_opt] = val
+
+                elif opt.startswith('stream'):
                     stream_name, stream_opt = opt.split(".", 1)
                     watcher[stream_name][stream_opt] = val
+
                 elif opt.startswith('rlimit_'):
                     limit = opt[7:]
                     watcher['rlimits'][limit] = int(val)
@@ -221,8 +242,8 @@ def get_config(config_file):
                     watcher['env'] = parse_env_str(val)
 
                 elif opt == 'autostart':
-                    watcher['autostart'] = dget(section, "autostart", True, bool)
-
+                    watcher['autostart'] = dget(section, "autostart",
+                                                True, bool)
                 else:
                     # freeform
                     watcher[opt] = val
@@ -242,6 +263,15 @@ def get_config(config_file):
             if not 'env' in watcher:
                 watcher['env'] = dict()
             watcher['env'].update(environs[watcher['name']])
+
+        plugin_streams = ['stream_stdout', 'stream_stderr']
+        for stream in plugin_streams:
+            if stream in watcher:
+                plugin = create_plugin_from_stream(watcher[stream],
+                                                   watcher['name'],
+                                                   stream)
+                if plugin:
+                    plugins.append(plugin)
 
     config['watchers'] = watchers
     config['plugins'] = plugins
