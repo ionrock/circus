@@ -72,9 +72,15 @@ def create_plugin_from_stream(conf, watcher, stream):
 
     # just grab stdout/err
     stream = stream.split('_')[1]
-    
+
+    # Update our class' path to redirect to the loggers
+    class_name = conf.pop('class')
+
+    if '.' not in class_name:
+        class_name = 'circus.plugins.loggers.%s' % class_name
+
     plugin = {
-        'use': conf.pop('class'),
+        'use': class_name,
         'topic': 'watcher.%s.%s' % (watcher, stream),
     }
     plugin.update(conf)
@@ -272,6 +278,9 @@ def get_config(config_file):
                                                    stream)
                 if plugin:
                     plugins.append(plugin)
+                    publishers = watcher.get('publish', {})
+                    publishers[stream.split('_')[1]] = True
+                    watcher['publish'] = publishers
 
     config['watchers'] = watchers
     config['plugins'] = plugins

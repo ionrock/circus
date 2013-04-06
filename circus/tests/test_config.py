@@ -15,6 +15,7 @@ _CONF = {
     'hooks': os.path.join(HERE, 'hooks.ini'),
     'env_var': os.path.join(HERE, 'env_var.ini'),
     'env_section': os.path.join(HERE, 'env_section.ini'),
+    'publish': os.path.join(HERE, 'publish.ini'),
 }
 
 
@@ -89,3 +90,28 @@ class TestConfig(unittest.TestCase):
         for watcher in [watcher1, watcher2]:
             self.assertEquals("%s:/bin" % os.getenv('PATH'),
                               watcher.env['PATH'])
+
+    def test_legacy_stream_settings(self):
+        """The legacy stream settings should create a plugin when used.
+        """
+        conf = get_config(_CONF['publish'])
+        watcher = conf['watchers'][0]
+        self.assertTrue(watcher['publish']['stdout'])
+
+        pub_watcher = conf['watchers'][1]
+        self.assertTrue(pub_watcher['publish']['stdout'])
+
+        print(conf['plugins'])
+
+        plugins = dict(
+            (plugin_conf['topic'], plugin_conf)
+            for plugin_conf in conf['plugins']
+        )
+
+        self.assertTrue(plugins['watcher.legacy.stdout'])
+        self.assertEqual(plugins['watcher.legacy.stdout']['use'],
+                         'circus.plugins.loggers.StdoutStream')
+
+        self.assertTrue(plugins['watcher.publisher.stdout'])
+        self.assertEqual(plugins['watcher.publisher.stdout']['use'],
+                         'circus.plugins.loggers.FancyStdoutStream')
